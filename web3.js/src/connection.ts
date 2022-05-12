@@ -2217,7 +2217,7 @@ export class Connection {
       httpHeaders = commitmentOrConfig.httpHeaders;
       fetchMiddleware = commitmentOrConfig.fetchMiddleware;
       disableRetryOnRateLimit = commitmentOrConfig.disableRetryOnRateLimit;
-      this._autoBatch = commitmentOrConfig.autoBatch;
+      this._autoBatch = commitmentOrConfig.autoBatch || true;
     }
 
     this._rpcEndpoint = endpoint;
