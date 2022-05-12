@@ -860,17 +860,54 @@ function createRpcClient(
   return clientBrowser;
 }
 
-function createRpcRequest(client: RpcClient): RpcRequest {
+function createRpcRequest(
+  client: RpcClient,
+  connection: Connection,
+): RpcRequest {
   return (method, args) => {
-    return new Promise((resolve, reject) => {
-      client.request(method, args, (err: any, response: any) => {
-        if (err) {
-          reject(err);
-          return;
+    if (connection._autoBatch) {
+      return new Promise((resolve, reject) => {
+        // Automatically batch requests every 50 ms.
+        const BATCH_INTERVAL_MS = 50;
+
+        connection._batchedRequests.push({
+          params: {methodName: method, args},
+          resolve,
+          reject,
+        });
+
+        if (!connection._pendingBatchTimer) {
+          connection._pendingBatchTimer = setTimeout(async () => {
+            try {
+              // Call the RPC batch request.
+              const unsafeRes = await connection._rpcBatchRequest(
+                connection._batchedRequests.map(e => e.params),
+              );
+              // Call resolve handler of each promise
+              connection._batchedRequests.forEach(({resolve}, i) =>
+                resolve(unsafeRes[i]),
+              );
+            } catch (err) {
+              // Call reject handler of each promise
+              connection._batchedRequests.forEach(({reject}) => reject(err));
+            } finally {
+              connection._pendingBatchTimer = undefined;
+              connection._batchedRequests = [];
+            }
+          }, BATCH_INTERVAL_MS);
         }
-        resolve(response);
       });
-    });
+    } else {
+      return new Promise((resolve, reject) => {
+        client.request(method, args, (err: any, response: any) => {
+          if (err) {
+            reject(err);
+            return;
+          }
+          resolve(response);
+        });
+      });
+    }
   };
 }
 
@@ -2073,6 +2110,8 @@ export type ConnectionConfig = {
   disableRetryOnRateLimit?: boolean;
   /** time to allow for the server to initially process a transaction (in milliseconds) */
   confirmTransactionInitialTimeout?: number;
+  /** automatically batch JSON RPC operations */
+  autoBatch?: boolean;
 };
 
 /**
@@ -2083,6 +2122,13 @@ export class Connection {
   /** @internal */ _confirmTransactionInitialTimeout?: number;
   /** @internal */ _rpcEndpoint: string;
   /** @internal */ _rpcWsEndpoint: string;
+  /** @internal */ _autoBatch?: boolean;
+  /** @internal */ _batchedRequests: {
+    params: RpcParams;
+    resolve: (value?: unknown) => void;
+    reject: (reason?: any) => void;
+  }[] = [];
+  /** @internal */ _pendingBatchTimer?: NodeJS.Timeout;
   /** @internal */ _rpcClient: RpcClient;
   /** @internal */ _rpcRequest: RpcRequest;
   /** @internal */ _rpcBatchRequest: RpcBatchRequest;
@@ -2171,6 +2217,7 @@ export class Connection {
       httpHeaders = commitmentOrConfig.httpHeaders;
       fetchMiddleware = commitmentOrConfig.fetchMiddleware;
       disableRetryOnRateLimit = commitmentOrConfig.disableRetryOnRateLimit;
+      this._autoBatch = commitmentOrConfig.autoBatch || true;
     }
 
     this._rpcEndpoint = endpoint;
@@ -2183,7 +2230,7 @@ export class Connection {
       fetchMiddleware,
       disableRetryOnRateLimit,
     );
-    this._rpcRequest = createRpcRequest(this._rpcClient);
+    this._rpcRequest = createRpcRequest(this._rpcClient, this);
     this._rpcBatchRequest = createRpcBatchRequest(this._rpcClient);
 
     this._rpcWebSocket = new RpcWebSocketClient(this._rpcWsEndpoint, {
